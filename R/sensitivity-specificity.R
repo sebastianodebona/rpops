@@ -1,0 +1,330 @@
+#' PoPS (Pest or Pathogen Spread) model Sensitivity
+#'
+#' A dynamic species distribution model for pest or pathogen spread in forest
+#' or agricultural ecosystems. The model is process based meaning that it uses
+#' understanding of the effect of weather and other environmental factors on
+#' reproduction and survival of the pest/pathogen in order to forecast spread
+#' of the pest/pathogen into the future. Run multiple stochasitic simulations,
+#' propogating uncertainty in parameters, initial conditions, and drivers.
+#' The model is process based meaning that it uses understanding of the effect
+#' of weather on reproduction and survival of the pest/pathogen in order to
+#' forecast spread of the pest/pathogen into the future.
+#'
+#' @inheritParams pops
+#' @param number_of_iterations how many iterations do you want to run to allow
+#' the calibration to converge at least 10
+#' @param number_of_cores enter how many cores you want to use (default = NA).
+#' If not set uses the # of CPU cores - 1. must be an integer >= 1
+#'
+#' @importFrom raster raster values as.matrix xres yres stack reclassify
+#' cellStats nlayers calc extract rasterToPoints
+#' @importFrom stats runif rnorm median sd
+#' @importFrom doParallel registerDoParallel
+#' @importFrom foreach  registerDoSEQ %dopar%
+#' @importFrom parallel makeCluster stopCluster detectCores
+#' @importFrom lubridate interval time_length mdy %within%
+#' @return list of infected and susceptible per year
+#' @export
+#'
+sensitivity <- function(infected_file,
+                        host_file,
+                        total_populations_file,
+                        parameter_means,
+                        parameter_cov_matrix,
+                        temp = FALSE,
+                        temperature_coefficient_file = "",
+                        precip = FALSE,
+                        precipitation_coefficient_file = "",
+                        model_type = "SI",
+                        latency_period = 0,
+                        time_step = "month",
+                        season_month_start = 1,
+                        season_month_end = 12,
+                        start_date = "2008-01-01",
+                        end_date = "2008-12-31",
+                        use_lethal_temperature = FALSE,
+                        temperature_file = "",
+                        lethal_temperature = -12.87,
+                        lethal_temperature_month = 1,
+                        mortality_on = FALSE,
+                        mortality_rate = 0,
+                        mortality_time_lag = 0,
+                        management = FALSE,
+                        treatment_dates = c(""),
+                        treatments_file = "",
+                        treatment_method = "ratio",
+                        natural_kernel_type = "cauchy",
+                        anthropogenic_kernel_type = "cauchy",
+                        natural_dir = "NONE",
+                        anthropogenic_dir = "NONE",
+                        number_of_iterations = 100,
+                        number_of_cores = NA,
+                        pesticide_duration = 0,
+                        pesticide_efficacy = 1.0,
+                        random_seed = NULL,
+                        output_frequency = "year",
+                        output_frequency_n = 1,
+                        movements_file = "",
+                        use_movements = FALSE,
+                        start_exposed = FALSE,
+                        generate_stochasticity = TRUE,
+                        establishment_stochasticity = TRUE,
+                        movement_stochasticity = TRUE,
+                        deterministic = FALSE,
+                        establishment_probability = 0.5,
+                        dispersal_percentage = 0.99,
+                        quarantine_areas_file = "",
+                        use_quarantine = FALSE,
+                        use_spreadrates = FALSE) {
+
+  config <- c()
+  config$random_seed <- random_seed
+  config$infected_file <- infected_file
+  config$host_file <- host_file
+  config$total_populations_file <- total_populations_file
+  config$parameter_means <- parameter_means
+  config$parameter_cov_matrix <- parameter_cov_matrix
+  config$temp <- temp
+  config$temperature_coefficient_file <- temperature_coefficient_file
+  config$precip <- precip
+  config$precipitation_coefficient_file <- precipitation_coefficient_file
+  config$model_type <- model_type
+  config$latency_period <- latency_period
+  config$time_step <- time_step
+  config$season_month_start <- season_month_start
+  config$season_month_end <- season_month_end
+  config$start_date <- start_date
+  config$end_date <- end_date
+  config$use_lethal_temperature <- use_lethal_temperature
+  config$temperature_file <- temperature_file
+  config$lethal_temperature <- lethal_temperature
+  config$lethal_temperature_month <- lethal_temperature_month
+  config$mortality_on <- mortality_on
+  config$mortality_rate <- mortality_rate
+  config$mortality_time_lag <- mortality_time_lag
+  config$management <- management
+  config$treatment_dates <- treatment_dates
+  config$treatments_file <- treatments_file
+  config$treatment_method <- treatment_method
+  config$natural_kernel_type <- natural_kernel_type
+  config$anthropogenic_kernel_type <- anthropogenic_kernel_type
+  config$natural_dir <- natural_dir
+  config$anthropogenic_dir <- anthropogenic_dir
+  config$pesticide_duration <- pesticide_duration
+  config$pesticide_efficacy <- pesticide_efficacy
+  config$output_frequency <- output_frequency
+  config$output_frequency_n <- output_frequency_n
+  config$movements_file <- movements_file
+  config$use_movements <- use_movements
+  config$start_exposed <- start_exposed
+  config$generate_stochasticity <- generate_stochasticity
+  config$establishment_stochasticity <- establishment_stochasticity
+  config$movement_stochasticity <- movement_stochasticity
+  config$deterministic <- deterministic
+  config$establishment_probability <- establishment_probability
+  config$dispersal_percentage <- dispersal_percentage
+  config$quarantine_areas_file <- quarantine_areas_file
+  config$use_quarantine <- use_quarantine
+  config$use_spreadrates <- use_spreadrates
+  config$number_of_iterations <- number_of_iterations
+  config$number_of_cores <- number_of_cores
+  # add function name for use in configuration function to skip
+  # function specific specifc configurations namely for validation and
+  # calibration.
+  config$function_name <- "sensitivity"
+  config$failure <- NULL
+
+  config <- configuration(config)
+
+  if (!is.null(config$failure)) {
+    return(config$failure)
+  }
+
+  i <- NULL
+
+  cl <- makeCluster(config$core_count)
+  registerDoParallel(cl)
+
+  infected_stack <-
+    foreach::foreach(i = seq_len(number_of_iterations),
+                     .combine = c,
+                     .packages = c("raster", "PoPS")) %dopar% {
+                       config$random_seed <- round(stats::runif(1, 1, 1000000))
+
+                       data <- pops_model(random_seed = config$random_seed,
+                                          use_lethal_temperature = config$use_lethal_temperature,
+                                          lethal_temperature = config$lethal_temperature,
+                                          lethal_temperature_month =
+                                            config$lethal_temperature_month,
+                                          infected = config$infected,
+                                          exposed = config$exposed,
+                                          susceptible = config$susceptible,
+                                          total_populations = config$total_populations,
+                                          mortality_on = config$mortality_on,
+                                          mortality_tracker = config$mortality_tracker,
+                                          mortality = config$mortality,
+                                          quarantine_areas = config$quarantine_areas,
+                                          treatment_maps = config$treatment_maps,
+                                          treatment_dates = config$treatment_dates,
+                                          pesticide_duration = config$pesticide_duration,
+                                          resistant = config$resistant,
+                                          use_movements = config$use_movements,
+                                          movements = config$movements,
+                                          movements_dates = config$movements_dates,
+                                          weather = config$weather,
+                                          temperature = config$temperature,
+                                          weather_coefficient = config$weather_coefficient,
+                                          ew_res = config$ew_res,
+                                          ns_res = config$ns_res,
+                                          num_rows = config$num_rows,
+                                          num_cols = config$num_cols,
+                                          time_step = config$time_step,
+                                          reproductive_rate = config$reproductive_rate[i],
+                                          mortality_rate = config$mortality_rate,
+                                          mortality_time_lag = config$mortality_time_lag,
+                                          season_month_start = config$season_month_start,
+                                          season_month_end = config$season_month_end,
+                                          start_date = config$start_date,
+                                          end_date = config$end_date,
+                                          treatment_method = config$treatment_method,
+                                          natural_kernel_type = config$natural_kernel_type,
+                                          anthropogenic_kernel_type =
+                                            config$anthropogenic_kernel_type,
+                                          use_anthropogenic_kernel =
+                                            config$use_anthropogenic_kernel,
+                                          percent_natural_dispersal =
+                                            config$percent_natural_dispersal[i],
+                                          natural_distance_scale =
+                                            config$natural_distance_scale[i],
+                                          anthropogenic_distance_scale =
+                                            config$anthropogenic_distance_scale[i],
+                                          natural_dir = config$natural_dir,
+                                          natural_kappa = config$natural_kappa[i],
+                                          anthropogenic_dir = config$anthropogenic_dir,
+                                          anthropogenic_kappa = config$anthropogenic_kappa[i],
+                                          output_frequency = config$output_frequency,
+                                          output_frequency_n = config$output_frequency_n,
+                                          quarantine_frequency = config$quarantine_frequency,
+                                          quarantine_frequency_n = config$quarantine_frequency_n,
+                                          use_quarantine = config$use_quarantine,
+                                          spreadrate_frequency = config$spreadrate_frequency,
+                                          spreadrate_frequency_n = config$spreadrate_frequency_n,
+                                          use_spreadrates = config$use_spreadrates,
+                                          model_type_ = config$model_type,
+                                          latency_period = config$latency_period,
+                                          generate_stochasticity =
+                                            config$generate_stochasticity,
+                                          establishment_stochasticity =
+                                            config$establishment_stochasticity,
+                                          movement_stochasticity = config$movement_stochasticity,
+                                          deterministic = config$deterministic,
+                                          establishment_probability =
+                                            config$establishment_probability,
+                                          dispersal_percentage = config$dispersal_percentage
+                       )
+
+                       comp_years <-
+                         raster::stack(lapply(seq_len(length(data$infected)),
+                                              function(i) config$host))
+                       detected_runs1 <-
+                         raster::stack(lapply(seq_len(length(data$infected)),
+                                              function(i) config$host))
+                       single_runs2 <-
+                         raster::stack(lapply(seq_len(length(data$infected)),
+                                              function(i) config$host))
+
+                       previous <- config$host
+                       previous[] <- config$infected
+                       detected <- previous
+                       detected[] <- 0
+                       current <- detected
+                       host10p <- round(config$host * 0.1)
+                       host10p[host10p > 1000000] <- 0
+                       for (q in seq_len(raster::nlayers(comp_years))) {
+                         detected[] <- 0
+                         current[] <- data$infected[[q]]
+                         current <- current - previous
+                         current[current <= 0] <- 0
+                         # test <- current - host10p
+                         # test[test < 0] <- FALSE
+                         # test[test >= 0] <- TRUE
+                         if (any(current[current >= host10p] > 0)) {
+                           previous[current >= host10p] <-
+                             previous[current >= host10p] +
+                             current[current >= host10p]
+                           detected[current >= host10p & current > 0] <- 1
+                         }
+                         single_runs2[[q]] <- data$infected[[q]]
+                         comp_years[[q]] <- current
+                         detected_runs1[[q]] <- detected
+                       }
+
+                       number_infected <- data$number_infected
+                       single_run <- single_runs2
+                       # comp_years <- comp_years/config$host
+                       comp_years <-
+                         raster::reclassify(comp_years, config$rclmat)
+                       comp_years <-
+                         raster::reclassify(
+                           comp_years,
+                           matrix(c(NA, 0), ncol = 2, byrow = TRUE),
+                           right = NA)
+                       infected_stack <- comp_years
+                       detected_runs2 <- detected_runs1
+                       data <-
+                         list(single_run,
+                              infected_stack,
+                              number_infected,
+                              detected_runs2)
+                     }
+
+  stopCluster(cl)
+  single_runs <- infected_stack[seq(1, length(infected_stack), 4)]
+  probability_runs <- infected_stack[seq(2, length(infected_stack), 4)]
+  number_infected_runs <- infected_stack[seq(3, length(infected_stack), 4)]
+  detected_runs <- infected_stack[seq(4, length(infected_stack), 4)]
+
+  prediction <- probability_runs[[1]]
+  prediction[prediction > 0] <- 0
+  detected_prob <- detected_runs[[1]]
+  detected_prob[detected_prob > 0] <- 0
+  infected_number <- data.frame(t(rep(0, nlayers(probability_runs[[1]]))))
+  max_values <- data.frame(t(rep(0, nlayers(probability_runs[[1]]))))
+
+  for (p in seq_len(length(probability_runs))) {
+    prediction <- prediction + probability_runs[[p]]
+    detected_prob <- detected_prob + detected_runs[[p]]
+    infected_number[p, ] <- number_infected_runs[[p]]
+    max_values[p, ] <- raster::maxValue(single_runs[[p]])
+  }
+
+  probability <- (prediction / length(probability_runs)) * 100
+  detected_probability <- (detected_prob / length(detected_runs)) * 100
+
+  simulation_mean_stack <- stack()
+  simulation_sd_stack <- stack()
+  for (q in seq_len(nlayers(single_runs[[1]]))) {
+    raster_stacks <- stack()
+    for (j in seq_len(length(single_runs))) {
+      raster_stacks <- stack(raster_stacks, single_runs[[j]][[q]])
+    }
+    simulation_mean <- raster::calc(raster_stacks, mean)
+    simulation_sd <- raster::calc(raster_stacks, sd)
+    simulation_mean_stack <- stack(simulation_mean_stack, simulation_mean)
+    simulation_sd_stack <- stack(simulation_sd_stack, simulation_sd)
+  }
+
+  outputs <-
+    list(probability,
+         detected_probability,
+         simulation_mean_stack,
+         simulation_sd_stack)
+
+  names(outputs) <-
+    c("probability",
+      "detected_probability",
+      "simulation_mean",
+      "simulation_sd")
+
+  return(outputs)
+}
